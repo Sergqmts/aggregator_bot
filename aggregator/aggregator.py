@@ -27,6 +27,8 @@ PUBLISH_INTERVAL = 5 * 60  # 5 minutes
 CLEANUP_INTERVAL = 24 * 60 * 60  # 24 hours
 CLEANUP_TTL_DAYS = 7
 MAX_CONCURRENT_FETCH = 10
+MAX_CONCURRENT_GROQ = 2
+GROQ_REQUEST_DELAY = 1.5  # seconds between groq calls
 
 HARD_STOPWORDS = ["erid", "реклама", "промокод", "партнёрский", "рекламный", "#реклама", "спонсор"]
 
@@ -150,28 +152,30 @@ async def is_duplicate(md5: str, source_url: str, db: aiosqlite.Connection) -> b
         return await cur.fetchone() is not None
 
 
-async def rewrite_with_groq(text: str, client: AsyncGroq) -> str | None:
-    for attempt in range(3):
-        try:
-            resp = await client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": REWRITE_PROMPT},
-                    {"role": "user", "content": text},
-                ],
-                max_tokens=1024,
-            )
-            return resp.choices[0].message.content.strip()
-        except Exception as e:
-            if "429" in str(e) or "rate" in str(e).lower():
-                wait = 2 ** attempt * 5
-                log.warning("Groq rate limit, retrying in %ds", wait)
-                await asyncio.sleep(wait)
-            else:
-                log.error("Groq error: %s", e)
-                return None
-    log.error("Groq: exhausted retries, skipping post")
-    return None
+async def rewrite_with_groq(text: str, client: AsyncGroq, sem: asyncio.Semaphore) -> str | None:
+    async with sem:
+        await asyncio.sleep(GROQ_REQUEST_DELAY)
+        for attempt in range(4):
+            try:
+                resp = await client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[
+                        {"role": "system", "content": REWRITE_PROMPT},
+                        {"role": "user", "content": text},
+                    ],
+                    max_tokens=1024,
+                )
+                return resp.choices[0].message.content.strip()
+            except Exception as e:
+                if "429" in str(e) or "rate" in str(e).lower():
+                    wait = 30 * (2 ** attempt)
+                    log.warning("Groq rate limit, retrying in %ds", wait)
+                    await asyncio.sleep(wait)
+                else:
+                    log.error("Groq error: %s", e)
+                    return None
+        log.error("Groq: exhausted retries, skipping post")
+        return None
 
 
 async def fetch_channel(
@@ -180,6 +184,7 @@ async def fetch_channel(
     topic: str,
     db: aiosqlite.Connection,
     groq_client: AsyncGroq,
+    groq_sem: asyncio.Semaphore,
 ):
     url = f"{RSSHUB_BASE}/telegram/channel/{username}"
     try:
@@ -203,7 +208,7 @@ async def fetch_channel(
         if await is_duplicate(md5, source_url, db):
             continue
 
-        rewritten = await rewrite_with_groq(text, groq_client)
+        rewritten = await rewrite_with_groq(text, groq_client, groq_sem)
         if not rewritten:
             continue
         if is_stop_word(rewritten, topic):
@@ -224,15 +229,15 @@ async def fetch_channel(
             log.error("DB insert error: %s", e)
 
 
-async def fetch_loop(channels, bots, db: aiosqlite.Connection, groq_client: AsyncGroq):
+async def fetch_loop(channels, bots, db: aiosqlite.Connection, groq_client: AsyncGroq, groq_sem: asyncio.Semaphore):
     while True:
         try:
-            sem = asyncio.Semaphore(MAX_CONCURRENT_FETCH)
+            fetch_sem = asyncio.Semaphore(MAX_CONCURRENT_FETCH)
             connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT_FETCH)
             async with aiohttp.ClientSession(connector=connector) as session:
                 async def bounded(ch):
-                    async with sem:
-                        await fetch_channel(session, ch["username"], ch["topic"], db, groq_client)
+                    async with fetch_sem:
+                        await fetch_channel(session, ch["username"], ch["topic"], db, groq_client, groq_sem)
 
                 await asyncio.gather(*[bounded(ch) for ch in channels])
             log.info("Fetch cycle done, sleeping %ds", FETCH_INTERVAL)
@@ -361,8 +366,9 @@ async def main():
 
     async with aiosqlite.connect(DB_PATH) as db:
         await init_db(db)
+        groq_sem = asyncio.Semaphore(MAX_CONCURRENT_GROQ)
         await asyncio.gather(
-            fetch_loop(channels, bots, db, groq_client),
+            fetch_loop(channels, bots, db, groq_client, groq_sem),
             publish_loop(bots, db),
             cleanup_loop(db),
         )
