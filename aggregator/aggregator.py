@@ -22,13 +22,10 @@ SOCIAL_API_URL = os.getenv("SOCIAL_API_URL", "http://localhost:5000")
 DB_PATH = os.getenv("DB_PATH", "aggregator/aggregator.db")
 RSSHUB_BASE = os.getenv("RSSHUB_BASE", "https://rsshub.app")
 
-FETCH_INTERVAL = 30 * 60   # 30 minutes
-PUBLISH_INTERVAL = 5 * 60  # 5 minutes
+CHANNEL_INTERVAL = 15 * 60  # 15 minutes between channels
 CLEANUP_INTERVAL = 24 * 60 * 60  # 24 hours
 CLEANUP_TTL_DAYS = 7
-MAX_CONCURRENT_FETCH = 10
-MAX_CONCURRENT_GROQ = 2
-GROQ_REQUEST_DELAY = 1.5  # seconds between groq calls
+GROQ_REQUEST_DELAY = 2  # seconds between groq calls within a channel
 
 HARD_STOPWORDS = ["erid", "реклама", "промокод", "партнёрский", "рекламный", "#реклама", "спонсор"]
 
@@ -174,30 +171,29 @@ async def is_duplicate(md5: str, source_url: str, db: aiosqlite.Connection) -> b
         return await cur.fetchone() is not None
 
 
-async def rewrite_with_groq(text: str, client: AsyncGroq, sem: asyncio.Semaphore) -> str | None:
-    async with sem:
-        await asyncio.sleep(GROQ_REQUEST_DELAY)
-        for attempt in range(4):
-            try:
-                resp = await client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=[
-                        {"role": "system", "content": REWRITE_PROMPT},
-                        {"role": "user", "content": text},
-                    ],
-                    max_tokens=1024,
-                )
-                return resp.choices[0].message.content.strip()
-            except Exception as e:
-                if "429" in str(e) or "rate" in str(e).lower():
-                    wait = 30 * (2 ** attempt)
-                    log.warning("Groq rate limit, retrying in %ds", wait)
-                    await asyncio.sleep(wait)
-                else:
-                    log.error("Groq error: %s", e)
-                    return None
-        log.error("Groq: exhausted retries, skipping post")
-        return None
+async def rewrite_with_groq(text: str, client: AsyncGroq) -> str | None:
+    await asyncio.sleep(GROQ_REQUEST_DELAY)
+    for attempt in range(4):
+        try:
+            resp = await client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": REWRITE_PROMPT},
+                    {"role": "user", "content": text},
+                ],
+                max_tokens=1024,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            if "429" in str(e) or "rate" in str(e).lower():
+                wait = 30 * (2 ** attempt)
+                log.warning("Groq rate limit, retrying in %ds", wait)
+                await asyncio.sleep(wait)
+            else:
+                log.error("Groq error: %s", e)
+                return None
+    log.error("Groq: exhausted retries, skipping post")
+    return None
 
 
 async def fetch_channel(
@@ -206,7 +202,6 @@ async def fetch_channel(
     topic: str,
     db: aiosqlite.Connection,
     groq_client: AsyncGroq,
-    groq_sem: asyncio.Semaphore,
 ):
     url = f"{RSSHUB_BASE}/telegram/channel/{username}"
     try:
@@ -230,7 +225,7 @@ async def fetch_channel(
         if await is_duplicate(md5, source_url, db):
             continue
 
-        rewritten = await rewrite_with_groq(text, groq_client, groq_sem)
+        rewritten = await rewrite_with_groq(text, groq_client)
         if not rewritten:
             continue
         if is_stop_word(rewritten, topic):
@@ -251,21 +246,52 @@ async def fetch_channel(
             log.error("DB insert error: %s", e)
 
 
-async def fetch_loop(channels, bots, db: aiosqlite.Connection, groq_client: AsyncGroq, groq_sem: asyncio.Semaphore):
-    while True:
-        try:
-            fetch_sem = asyncio.Semaphore(MAX_CONCURRENT_FETCH)
-            connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT_FETCH)
-            async with aiohttp.ClientSession(connector=connector) as session:
-                async def bounded(ch):
-                    async with fetch_sem:
-                        await fetch_channel(session, ch["username"], ch["topic"], db, groq_client, groq_sem)
+async def publish_pending_for_topic(topic: str, bots: dict, db: aiosqlite.Connection):
+    bot_config = bots.get(topic)
+    if not bot_config:
+        log.warning("No bot config for topic %s", topic)
+        return
+    async with aiohttp.ClientSession() as session:
+        while True:
+            async with db.execute(
+                "SELECT id, md5, source_url, rewritten_text, media_url, topic "
+                "FROM publish_queue WHERE status='pending' AND topic=? ORDER BY created_at LIMIT 1",
+                (topic,),
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                break
+            post = {
+                "id": row[0], "md5": row[1], "source_url": row[2],
+                "rewritten_text": row[3], "media_url": row[4], "topic": row[5],
+            }
+            ok = await publish_one(session, post, bot_config)
+            status = "published" if ok else "failed"
+            await db.execute(
+                "UPDATE publish_queue SET status=?, published_at=datetime('now') WHERE id=?",
+                (status, post["id"]),
+            )
+            if ok:
+                await db.execute(
+                    "INSERT OR IGNORE INTO sent_hashes (md5, source_url, published_at) "
+                    "VALUES (?, ?, datetime('now'))",
+                    (post["md5"], post["source_url"]),
+                )
+            await db.commit()
+            log.info("Post %d → %s", post["id"], status)
 
-                await asyncio.gather(*[bounded(ch) for ch in channels])
-            log.info("Fetch cycle done, sleeping %ds", FETCH_INTERVAL)
-        except Exception as e:
-            log.error("fetch_loop error: %s", e)
-        await asyncio.sleep(FETCH_INTERVAL)
+
+async def fetch_loop(channels, bots, db: aiosqlite.Connection, groq_client: AsyncGroq):
+    while True:
+        for ch in channels:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    await fetch_channel(session, ch["username"], ch["topic"], db, groq_client)
+                await publish_pending_for_topic(ch["topic"], bots, db)
+            except Exception as e:
+                log.error("fetch_loop error [%s]: %s", ch["username"], e)
+            log.info("Channel @%s done, sleeping %ds", ch["username"], CHANNEL_INTERVAL)
+            await asyncio.sleep(CHANNEL_INTERVAL)
 
 
 async def publish_one(
@@ -325,47 +351,6 @@ async def publish_one(
         return False
 
 
-async def publish_loop(bots, db: aiosqlite.Connection):
-    while True:
-        try:
-            async with db.execute(
-                "SELECT id, md5, source_url, rewritten_text, media_url, topic "
-                "FROM publish_queue WHERE status='pending' ORDER BY created_at LIMIT 1"
-            ) as cur:
-                row = await cur.fetchone()
-
-            if row:
-                post = {
-                    "id": row[0], "md5": row[1], "source_url": row[2],
-                    "rewritten_text": row[3], "media_url": row[4], "topic": row[5],
-                }
-                bot_config = bots.get(post["topic"])
-                if not bot_config:
-                    log.warning("No bot config for topic %s, marking failed", post["topic"])
-                    await db.execute(
-                        "UPDATE publish_queue SET status='failed' WHERE id=?", (post["id"],)
-                    )
-                    await db.commit()
-                else:
-                    async with aiohttp.ClientSession() as session:
-                        ok = await publish_one(session, post, bot_config)
-                    status = "published" if ok else "failed"
-                    await db.execute(
-                        "UPDATE publish_queue SET status=?, published_at=datetime('now') WHERE id=?",
-                        (status, post["id"]),
-                    )
-                    if ok:
-                        await db.execute(
-                            "INSERT OR IGNORE INTO sent_hashes (md5, source_url, published_at) "
-                            "VALUES (?, ?, datetime('now'))",
-                            (post["md5"], post["source_url"]),
-                        )
-                    await db.commit()
-                    log.info("Post %d → %s", post["id"], status)
-        except Exception as e:
-            log.error("publish_loop error: %s", e)
-        await asyncio.sleep(PUBLISH_INTERVAL)
-
 
 async def cleanup_loop(db: aiosqlite.Connection):
     while True:
@@ -388,10 +373,8 @@ async def main():
 
     async with aiosqlite.connect(DB_PATH) as db:
         await init_db(db)
-        groq_sem = asyncio.Semaphore(MAX_CONCURRENT_GROQ)
         await asyncio.gather(
-            fetch_loop(channels, bots, db, groq_client, groq_sem),
-            publish_loop(bots, db),
+            fetch_loop(channels, bots, db, groq_client),
             cleanup_loop(db),
         )
 
