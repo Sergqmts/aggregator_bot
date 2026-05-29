@@ -1,0 +1,5 @@
+aiohttp>=3.9
+aiosqlite>=0.20
+feedparser>=6.0
+groq>=0.9
+python-dotenv>=1.0

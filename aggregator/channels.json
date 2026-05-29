@@ -1,0 +1,14 @@
+[
+  {"username": "ixbt_live",        "topic": "it"},
+  {"username": "habr_com",        "topic": "it"},
+  {"username": "exploitex",       "topic": "it"},
+  {"username": "vkusno_i_tochka", "topic": "cooking"},
+  {"username": "gotovim_doma_ru", "topic": "cooking"},
+  {"username": "kinopoisk",       "topic": "entertainment"},
+  {"username": "filmru",          "topic": "entertainment"},
+  {"username": "autopotoknews",   "topic": "auto"},
+  {"username": "zr_ru",           "topic": "auto"},
+  {"username": "ranarod",         "topic": "travel"},
+  {"username": "samokatus",       "topic": "travel"},
+  {"username": "kudago",          "topic": "leisure"}
+]
