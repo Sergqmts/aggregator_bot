@@ -9,3 +9,14 @@ services:
       NODE_ENV: production
       CACHE_TYPE: memory
       CACHE_EXPIRE: 300
+
+  aggregator:
+    build: .
+    container_name: aggregator
+    restart: always
+    depends_on:
+      - rsshub
+    environment:
+      RSSHUB_BASE: http://rsshub:1200
+    env_file:
+      - .env

@@ -1,10 +1,13 @@
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import os
 import re
+import socket
 from pathlib import Path
+from urllib.parse import urlparse
 
 import aiohttp
 import aiosqlite
@@ -52,13 +55,35 @@ logging.basicConfig(
 log = logging.getLogger("aggregator")
 
 
+def _is_safe_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        for info in socket.getaddrinfo(hostname, None):
+            addr = ipaddress.ip_address(info[4][0])
+            if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved or addr.is_multicast:
+                return False
+        return True
+    except Exception:
+        return False
+
+
 def load_config():
     base = Path(__file__).parent
     with open(base / "channels.json", encoding="utf-8") as f:
         channels = json.load(f)
     with open(base / "bots.json", encoding="utf-8") as f:
         bots_list = json.load(f)
-    bots = {b["topic"]: b for b in bots_list}
+    bots = {}
+    for b in bots_list:
+        token = os.getenv(b["bot_token_env"], "")
+        if not token:
+            log.warning("Missing env var %s for topic %s", b["bot_token_env"], b["topic"])
+        bots[b["topic"]] = {"bot_token": token, "community_id": b["community_id"]}
     return channels, bots
 
 
@@ -228,25 +253,34 @@ async def publish_one(
     media_url = post["media_url"]
 
     if media_url:
+        if not _is_safe_url(media_url):
+            log.warning("media_url failed safety check, skipping media")
+            media_url = None
+
+    if media_url:
         try:
             async with session.get(media_url, timeout=aiohttp.ClientTimeout(total=15)) as r:
                 if r.status == 200:
-                    image_bytes = await r.read()
-                    form = aiohttp.FormData()
-                    form.add_field("community_id", str(community_id))
-                    form.add_field("body", text)
-                    form.add_field("media", image_bytes, filename="image.jpg", content_type="image/jpeg")
-                    async with session.post(endpoint, data=form, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                        if resp.status == 200:
-                            return True
-                        if resp.status not in (400,):
-                            log.warning("sendPost with media status %d", resp.status)
-                            return False
-                        # 400 → fallback without media
+                    content_type = r.headers.get("Content-Type", "")
+                    if not content_type.startswith("image/"):
+                        log.warning("media_url returned non-image content-type, skipping media")
+                    else:
+                        image_bytes = await r.read(10 * 1024 * 1024)  # 10 MB max
+                        form = aiohttp.FormData()
+                        form.add_field("community_id", str(community_id))
+                        form.add_field("body", text)
+                        form.add_field("media", image_bytes, filename="image.jpg", content_type="image/jpeg")
+                        async with session.post(endpoint, data=form, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                            if resp.status == 200:
+                                return True
+                            if resp.status not in (400,):
+                                log.warning("sendPost with media: status %d", resp.status)
+                                return False
+                            # 400 → fallback without media
                 else:
-                    log.warning("media download %s status %d", media_url, r.status)
+                    log.warning("media download: status %d", r.status)
         except Exception as e:
-            log.warning("media fetch/send error, fallback: %s", e)
+            log.warning("media fetch/send error, fallback: %s", type(e).__name__)
 
     # JSON fallback (no media)
     try:
@@ -260,7 +294,7 @@ async def publish_one(
             log.warning("sendPost (no media) status %d", resp.status)
             return False
     except Exception as e:
-        log.error("sendPost error: %s", e)
+        log.error("sendPost error: %s", type(e).__name__)
         return False
 
 

@@ -1,8 +1,8 @@
 [
-  {"topic": "it",            "bot_token": "572482563:OABxLPODPLGNAiUxpF67gAgnocepNWtdR6xrIpYd1C0",            "community_id": "8"},
-  {"topic": "cooking",       "bot_token": "480618907:IkChuRyV_i__nOF1so2spIfRZAKy47-HSSuJIf7NYto",       "community_id": "10"},
-  {"topic": "entertainment", "bot_token": "173378896:33ye7lPJZfhoG9UKiLzrabYJTVx0Rh4quDIx_lTFJrY", "community_id": "13"},
-  {"topic": "auto",          "bot_token": "317987685:cuwusE5qnW0xiFd_6o_rSi8KWBcZPL2R_R7iwAgAMMg",          "community_id": "11"},
-  {"topic": "travel",        "bot_token": "635525900:0pBFODM8ArNT2GGox4cE0rgbIyOA-uCLGqqb6IUEwDo",        "community_id": "9"},
-  {"topic": "leisure",       "bot_token": "801523818:A0X2mdHq_2sJdfrGbIttT5QQnRPkuDahwRX_WM9EjIk",       "community_id": "12"}
+  {"topic": "it",            "bot_token_env": "BOT_TOKEN_IT",            "community_id": "8"},
+  {"topic": "cooking",       "bot_token_env": "BOT_TOKEN_COOKING",       "community_id": "10"},
+  {"topic": "entertainment", "bot_token_env": "BOT_TOKEN_ENTERTAINMENT", "community_id": "13"},
+  {"topic": "auto",          "bot_token_env": "BOT_TOKEN_AUTO",          "community_id": "11"},
+  {"topic": "travel",        "bot_token_env": "BOT_TOKEN_TRAVEL",        "community_id": "9"},
+  {"topic": "leisure",       "bot_token_env": "BOT_TOKEN_LEISURE",       "community_id": "12"}
 ]

@@ -1,0 +1,6 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "python aggregator/aggregator.py"
+restartPolicyType = "always"
