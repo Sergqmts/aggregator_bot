@@ -79,6 +79,51 @@ def test_parse_rss_entry_empty_description():
     assert media_url is None
 
 
+def test_parse_rss_entry_media_content():
+    entry = _entry(
+        summary="Текст",
+        link="https://t.me/x/4",
+        enclosures=[],
+        media_content=[{"url": "https://example.com/photo.jpg"}],
+    )
+    _, media_url, _ = parse_rss_entry(entry)
+    assert media_url == "https://example.com/photo.jpg"
+
+
+def test_parse_rss_entry_media_thumbnail():
+    entry = _entry(
+        summary="Текст",
+        link="https://t.me/x/5",
+        enclosures=[],
+        media_content=[],
+        media_thumbnail=[{"url": "https://example.com/thumb.jpg"}],
+    )
+    _, media_url, _ = parse_rss_entry(entry)
+    assert media_url == "https://example.com/thumb.jpg"
+
+
+def test_parse_rss_entry_img_in_html():
+    entry = _entry(
+        summary='<p>Текст</p><img src="https://example.com/inline.jpg" />',
+        link="https://t.me/x/6",
+        enclosures=[],
+    )
+    text, media_url, _ = parse_rss_entry(entry)
+    assert media_url == "https://example.com/inline.jpg"
+    assert "<" not in text
+
+
+def test_parse_rss_entry_enclosure_takes_priority():
+    entry = _entry(
+        summary='<img src="https://example.com/inline.jpg" />',
+        link="https://t.me/x/7",
+        enclosures=[{"href": "https://example.com/enclosure.jpg"}],
+        media_content=[{"url": "https://example.com/media.jpg"}],
+    )
+    _, media_url, _ = parse_rss_entry(entry)
+    assert media_url == "https://example.com/enclosure.jpg"
+
+
 # --- is_duplicate (async) ---
 
 @pytest.mark.asyncio

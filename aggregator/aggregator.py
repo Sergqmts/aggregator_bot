@@ -128,16 +128,38 @@ def is_stop_word(text: str, topic: str) -> bool:
 
 
 def parse_rss_entry(entry) -> tuple[str, str | None, str]:
-    text = entry.get("summary") or entry.get("description") or ""
-    # strip html tags
-    text = re.sub(r"<[^>]+>", "", text).strip()
+    raw_html = entry.get("summary") or entry.get("description") or ""
+    img_in_html = None
+    m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', raw_html)
+    if m:
+        img_in_html = m.group(1)
+
+    text = re.sub(r"<[^>]+>", "", raw_html).strip()
     source_url = entry.get("link") or ""
+
     media_url = None
+
     enclosures = entry.get("enclosures", [])
     if enclosures:
-        href = enclosures[0].get("href")
-        if href:
-            media_url = href
+        media_url = enclosures[0].get("href")
+
+    if not media_url:
+        for item in entry.get("media_content", []):
+            url = item.get("url", "")
+            if url:
+                media_url = url
+                break
+
+    if not media_url:
+        for item in entry.get("media_thumbnail", []):
+            url = item.get("url", "")
+            if url:
+                media_url = url
+                break
+
+    if not media_url:
+        media_url = img_in_html
+
     return text, media_url, source_url
 
 
