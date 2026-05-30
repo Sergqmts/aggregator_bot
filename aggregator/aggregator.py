@@ -302,7 +302,10 @@ async def publish_one(
     token = bot_config["bot_token"]
     community_id = bot_config["community_id"]
     endpoint = f"{SOCIAL_API_URL}/bot{token}/sendPost"
+    source_url = post.get("source_url", "")
     text = post["rewritten_text"]
+    if source_url:
+        text = f"{text}\n\nИсточник: {source_url}"
     media_url = post["media_url"]
 
     if media_url:
@@ -314,20 +317,22 @@ async def publish_one(
         try:
             async with session.get(media_url, timeout=aiohttp.ClientTimeout(total=15)) as r:
                 if r.status == 200:
-                    content_type = r.headers.get("Content-Type", "")
+                    content_type = r.headers.get("Content-Type", "").split(";")[0].strip()
                     if not content_type.startswith("image/"):
-                        log.warning("media_url returned non-image content-type, skipping media")
+                        log.warning("media_url returned non-image content-type %r, skipping media", content_type)
                     else:
                         image_bytes = await r.read(10 * 1024 * 1024)  # 10 MB max
+                        ext = content_type.split("/")[-1] or "jpg"
                         form = aiohttp.FormData()
                         form.add_field("community_id", str(community_id))
                         form.add_field("body", text)
-                        form.add_field("media", image_bytes, filename="image.jpg", content_type="image/jpeg")
+                        form.add_field("media", image_bytes, filename=f"image.{ext}", content_type=content_type)
                         async with session.post(endpoint, data=form, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                             if resp.status == 200:
                                 return True
+                            body = await resp.text()
+                            log.warning("sendPost with media: status %d body=%r", resp.status, body[:200])
                             if resp.status not in (400,):
-                                log.warning("sendPost with media: status %d", resp.status)
                                 return False
                             # 400 → fallback without media
                 else:
