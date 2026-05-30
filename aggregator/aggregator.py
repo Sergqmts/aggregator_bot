@@ -321,7 +321,7 @@ async def publish_one(
                     if not content_type.startswith("image/"):
                         log.warning("media_url returned non-image content-type %r, skipping media", content_type)
                     else:
-                        image_bytes = await r.read(10 * 1024 * 1024)  # 10 MB max
+                        image_bytes = await r.content.read(10 * 1024 * 1024)  # 10 MB max
                         ext = content_type.split("/")[-1] or "jpg"
                         form = aiohttp.FormData()
                         form.add_field("community_id", str(community_id))
